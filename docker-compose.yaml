@@ -1,0 +1,134 @@
+services:
+  # Compute budget matched to Pinot server: 4 vCPU / 4 GB heap (+ ~1g overhead)
+  spark-master:
+    image: apache/spark:3.5.8
+    container_name: spark-master
+    hostname: spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    environment:
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_MASTER_PORT=7077
+      - SPARK_MASTER_WEBUI_PORT=8080
+      - SPARK_NO_DAEMONIZE=true
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+      - "4041:4040"
+    volumes:
+      - .:/opt/spark/work-dir
+      - ./spark-events:/tmp/spark-events
+    cpus: 1.0
+    mem_limit: 1g
+
+  spark-worker:
+    image: apache/spark:3.5.8
+    container_name: spark-worker
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077 --cores 4 --memory 4g
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"
+      - "4042:4040"
+    volumes:
+      - .:/opt/spark/work-dir
+      - ./spark-events:/tmp/spark-events
+    cpus: 4.0
+    mem_limit: 5g
+
+  spark-history-server:
+    image: apache/spark:3.5.8
+    container_name: spark-history-server
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.history.HistoryServer
+    depends_on:
+      - spark-master
+    ports:
+      - "18080:18080"
+    volumes:
+      - ./spark-events:/tmp/spark-events
+    profiles: ["history"]
+
+  # --- Apache Pinot (ZK + Controller + Broker + Server) ---
+  pinot-zookeeper:
+    image: zookeeper:3.9.2
+    container_name: pinot-zookeeper
+    hostname: pinot-zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_4LW_COMMANDS_WHITELIST: "mntr,conf,ruok"
+      JVMFLAGS: "-Xms64m -Xmx256m"
+    mem_limit: 384m
+
+  pinot-controller:
+    image: apachepinot/pinot:1.2.0
+    container_name: pinot-controller
+    hostname: pinot-controller
+    command: StartController -zkAddress pinot-zookeeper:2181 -dataDir /opt/pinot/data
+    ports:
+      - "19000:9000"
+    environment:
+      JAVA_OPTS: >-
+        -Dplugins.dir=/opt/pinot/plugins
+        -Xms1g -Xmx4g
+        -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+    volumes:
+      - pinot_controller_data:/var/pinot/controller/data
+      - .:/opt/pinot/imdb:ro
+    depends_on:
+      - pinot-zookeeper
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    mem_limit: 4g
+
+  pinot-broker:
+    image: apachepinot/pinot:1.2.0
+    container_name: pinot-broker
+    hostname: pinot-broker
+    command: StartBroker -zkAddress pinot-zookeeper:2181
+    ports:
+      - "8099:8099"
+    environment:
+      JAVA_OPTS: >-
+        -Dplugins.dir=/opt/pinot/plugins
+        -Xms1g -Xmx4g
+        -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+    depends_on:
+      pinot-controller:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8099/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    mem_limit: 4g
+
+  # Compute budget matched to Spark worker: 4 vCPU / 4 GB heap (+ ~1g overhead)
+  pinot-server:
+    image: apachepinot/pinot:1.2.0
+    container_name: pinot-server
+    hostname: pinot-server
+    command: StartServer -zkAddress pinot-zookeeper:2181
+    ports:
+      - "8098:8098"
+    environment:
+      JAVA_OPTS: >-
+        -Dplugins.dir=/opt/pinot/plugins
+        -Xms4g -Xmx4g
+        -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+    volumes:
+      - pinot_server_data:/var/pinot/server/data
+    depends_on:
+      pinot-broker:
+        condition: service_healthy
+    cpus: 4.0
+    mem_limit: 5g
+
+volumes:
+  pinot_controller_data:
+  pinot_server_data:
